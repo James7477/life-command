@@ -211,7 +211,91 @@ const SpeechRec=window.SpeechRecognition||window.webkitSpeechRecognition;
 function stopMic(){continueListening=false;$('handsFree').checked=false;if(mic){try{mic.stop()}catch(e){}}micActive=false;listenStatus()}
 function startMic(){if(!SpeechRec){response('This browser does not support speech recognition. You can still type a command below.');continueListening=false;$('handsFree').checked=false;return}if(micActive)return;try{mic=new SpeechRec();mic.lang='en-US';mic.interimResults=false;mic.continuous=false;mic.maxAlternatives=1;mic.onstart=()=>{micActive=true;listenStatus()};mic.onresult=e=>{const s=e.results[e.results.length-1][0].transcript;$('lastTranscript').textContent='You said: '+s;interpret(s)};mic.onerror=e=>{micError=true;if(['not-allowed','service-not-allowed','audio-capture'].includes(e.error)){continueListening=false;$('handsFree').checked=false}toast('Microphone: '+e.error+'. You can type instead.')};mic.onend=()=>{micActive=false;listenStatus();if(continueListening&&!micError&&document.visibilityState==='visible'){setTimeout(()=>{if(continueListening&&document.visibilityState==='visible')startMic()},900)}else if(micError){continueListening=false;$('handsFree').checked=false}};micError=false;mic.start()}catch(e){continueListening=false;$('handsFree').checked=false;toast('Unable to use microphone. Try typing instead.')}}
 function onCommand(cmd){interpret(cmd);show($('guardian').classList.contains('active')?'guardian':document.querySelector('.screen.active')?.id||'today')}
+
+/* V0.4: all appointment and activity records remain in the encrypted vault. */
+function lcWindow(q){
+ const text=String(q||'').toLowerCase(),now=new Date(),start=new Date(now);start.setHours(0,0,0,0);
+ if(/\blast week\b/.test(text)||/\bthis week\b/.test(text)){
+   start.setDate(start.getDate()-(start.getDay()+6)%7);
+   if(/\blast week\b/.test(text)){const end=+start;start.setDate(start.getDate()-7);return {start:+start,end,label:'last week'};}
+   return {start:+start,end:Date.now(),label:'this week so far'};
+ }
+ if(/\blast (?:seven|7) days\b/.test(text))return {start:Date.now()-604800000,end:Date.now(),label:'the last seven days'};
+ if(/\byesterday\b/.test(text))start.setDate(start.getDate()-1);
+ const day=start.toLocaleDateString([],{weekday:'long',month:'long',day:'numeric'});
+ return {start:+start,end:+start+86400000,label:/\byesterday\b/.test(text)?'yesterday':day};
+}
+function lcWorkHours(q){
+ const w=lcWindow(q);let milliseconds=0,shifts=0;
+ for(const s of db.work.sessions){const a=Number(s.start),b=Number(s.end);if(!Number.isFinite(a)||!Number.isFinite(b))continue;const elapsed=Math.max(0,Math.min(b,w.end)-Math.max(a,w.start));if(elapsed){milliseconds+=elapsed;shifts++;}}
+ const open=Number(db.work.started);if(open){const part=Math.max(0,Math.min(Date.now(),w.end)-Math.max(open,w.start));if(part){milliseconds+=part;shifts++;}}
+ return 'For '+w.label+', you have '+formatMinutes(milliseconds)+' of recorded work across '+shifts+' shift'+(shifts===1?'':'s')+'. This only counts shifts tracked in Life Command, not an employer timesheet.';
+}
+function lcActivitySummary(q){
+ const w=lcWindow(q);
+ const entries=db.logs.filter(x=>x.at>=w.start&&x.at<w.end&&x.kind!=='conversation');
+ const events=(db.events||[]).filter(x=>x.start>=w.start&&x.start<w.end).slice(0,3);
+ if(!entries.length&&!events.length)return 'For '+w.label+', I have no recorded activities yet. I can only describe things you saved.';
+ const lines=entries.slice(0,6).map(x=>x.content).concat(events.map(x=>'Appointment: '+x.title));
+ return 'For '+w.label+', I found: '+lines.join('; ')+(entries.length>6?'; and '+(entries.length-6)+' more journal entries.':'.');
+}
+function lcReadAppointment(raw){
+ const match=String(raw).match(/\b((?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday)|today|tomorrow)\s*(?:at\s*)?(\d{1,2})(?::([0-5]\d))?\s*(a\.?m\.?|p\.?m\.?)\b/i);
+ if(!match||!/\b(?:appointment|meeting|calendar|doctor|dentist)\b/i.test(raw))return null;
+ const hour=Number(match[2]),minute=Number(match[3]||0),meridiem=match[4].toLowerCase().replace(/\./g,'');
+ if(hour<1||hour>12)return null;
+ const target=new Date();target.setSeconds(0,0);target.setHours(hour%12+(meridiem==='pm'?12:0),minute,0,0);
+ const dayText=match[1].toLowerCase();
+ if(dayText==='tomorrow')target.setDate(target.getDate()+1);
+ else if(dayText==='today'){if(target.getTime()<Date.now())return null;}
+ else{
+  const wd=['sunday','monday','tuesday','wednesday','thursday','friday','saturday'].indexOf(dayText.replace(/^(this|next)\s+/,''));
+  if(wd<0)return null;
+  let ahead=(wd-target.getDay()+7)%7;if(ahead===0&&target.getTime()<Date.now())ahead=7;
+  if(/^next\s/.test(dayText))ahead+=7;
+  target.setDate(target.getDate()+ahead);
+ }
+ const prefix=String(raw).slice(0,match.index).replace(/^(?:please\s+)?(?:remind me(?: that)?\s+|(?:add|put)\s+)?/i,'').replace(/^i\s+(?:have|got)\s+/i,'').trim();
+ return {title:prefix||'Appointment',start:target.getTime(),end:target.getTime()+3600000};
+}
+function lcAddAppointment(evt){
+ const e={id:id(),title:evt.title.slice(0,150),start:evt.start,end:evt.end,at:Date.now()};db.events.unshift(e);save();
+ const reminder=e.start-15*60000;if(reminder>Date.now())addTask('Appointment: '+e.title,reminder);
+ log('appointment','Appointment '+e.title+' scheduled '+friendly(e.start));
+ response('I saved '+e.title+' for '+friendly(e.start)+' in your encrypted Life Command vault. Tap Add to Calendar to create a second copy in your chosen calendar. A fifteen-minute app reminder was added when possible.',true);
+ show('today');
+}
+function lcCalendarTime(ms){return new Date(ms).toISOString().replace(/[-:]/g,'').replace(/\.\d{3}/,'')}
+function lcICSQuote(text){return String(text).replace(/\\/g,'\\\\').replace(/\r?\n/g,'\\n').replace(/;/g,'\\;').replace(/,/g,'\\,')}
+function lcCalendarBackup(e){
+ if(!e)return;
+ const service=db.settings.calendarChoice||'device';
+ if(service==='only'){toast('Calendar backup is off. Choose your calendar in Setup to enable it.');return}
+ const from=lcCalendarTime(e.start),to=lcCalendarTime(e.end);
+ if(service==='google'||service==='outlook'){
+   const url=service==='google'?'https://calendar.google.com/calendar/render?action=TEMPLATE&text='+encodeURIComponent(e.title)+'&dates='+encodeURIComponent(from+'/'+to):
+   'https://outlook.live.com/calendar/0/deeplink/compose?subject='+encodeURIComponent(e.title)+'&startdt='+encodeURIComponent(new Date(e.start).toISOString())+'&enddt='+encodeURIComponent(new Date(e.end).toISOString());
+   const win=window.open(url,'_blank','noopener,noreferrer');
+   if(win)toast('Calendar opened. Confirm SAVE there to create a backup.');
+   else toast('Calendar window was blocked. Allow pop-ups or select the phone calendar in Setup.');
+   return
+ }
+ const lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Life Command//Event Backup//EN','BEGIN:VEVENT','UID:'+e.id+'@life-command.local','DTSTAMP:'+lcCalendarTime(Date.now()),'DTSTART:'+from,'DTEND:'+to,'SUMMARY:'+lcICSQuote(e.title),'END:VEVENT','END:VCALENDAR'];
+ const blob=new Blob([lines.join('\r\n')],{type:'text/calendar;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');
+ a.href=url;a.download='life-command-'+dayKey(new Date(e.start))+'.ics';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),1500);
+ toast('Calendar file downloaded. Open or import it into your phone calendar to confirm the backup.');
+}
+function renderCalendarEvents(){
+ const host=$('calendarEvents');if(!host)return;
+ const items=(db.events||[]).slice().sort((a,b)=>a.start-b.start).filter(e=>e.end>Date.now()-86400000).slice(0,15);
+ host.innerHTML=items.length?items.map(e=>'<div class="action"><span>📅</span><div class="details"><strong>'+clean(e.title)+'</strong><div class="meta">'+clean(friendly(e.start))+' · Encrypted in Life Command</div><button class="btn small" type="button" data-calendar-backup="'+clean(e.id)+'">📤 Add to Calendar</button></div></div>').join(''):'<div class="empty">No appointments yet. Say “Remind me I have an appointment Friday at 10 AM.”</div>';
+}
+$('calendarEvents').addEventListener('click',e=>{const b=e.target.closest('[data-calendar-backup]');if(!b)return;lcCalendarBackup((db.events||[]).find(x=>x.id===b.dataset.calendarBackup))});
+
 function interpret(raw){if(!vaultKey)return;const s=String(raw||'').trim().replace(/^(?:hey|okay|ok)\s+(?:buddy|friend|[a-z]+)[,\s:]*/i,'');if(!s)return;const lower=s.toLowerCase();$('lastTranscript').textContent='You said: '+raw;log('conversation','You: '+String(raw).slice(0,1400));
+ if(/\b(?:how many hours|hours did i work|how much time did i work)\b/i.test(lower)){requirePin(()=>response(lcWorkHours(lower),true));return}
+ if(/\b(?:what(?: all)? did i do|what have i done|tell me what i did|summari[sz]e (?:my |the )?(?:day|week))\b/i.test(lower)){requirePin(()=>{show('journal');response(lcActivitySummary(lower),true);});return}
+ const event=lcReadAppointment(s);if(event){lcAddAppointment(event);return}
  if(/\b(flat(?: tire)?|puncture|broke down|breakdown|dead battery|out of gas|ran out of gas|need roadside|sos|emergency|need help)\b/i.test(lower)){const incident=/flat|puncture/.test(lower)?'flat':/battery/.test(lower)?'battery':/gas/.test(lower)?'gas':/accident|crash/.test(lower)?'accident':/medical|hurt/.test(lower)?'medical':'breakdown';setIncident(incident);show('guardian');response(`I'm here. It sounds like you have ${incidentText()}. First, are you somewhere safe? You can call your spouse, a friend, AAA, or share your location once you approve it.`,true);return}
  const gift=s.match(/\b(?:add|put)\s+(.+?)\s+(?:to|on)\s+(.+?)['’]s\s+(?:christmas|birthday|gift)\s+list\b/i);if(gift){addGift(gift[2],gift[1]);return}
  if(/\b(?:clock(?:\s+me)?\s+out|(?:i(?:'m| am)?\s+)?(?:done|finished)\s+(?:with\s+)?work(?:ing)?|end(?:ed)?\s+(?:my\s+)?shift)\b/i.test(lower)){clockOut();return}
