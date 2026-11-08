@@ -275,9 +275,8 @@ function lcCalendarBackup(e){
  if(service==='google'||service==='outlook'){
    const url=service==='google'?'https://calendar.google.com/calendar/render?action=TEMPLATE&text='+encodeURIComponent(e.title)+'&dates='+encodeURIComponent(from+'/'+to):
    'https://outlook.live.com/calendar/0/deeplink/compose?subject='+encodeURIComponent(e.title)+'&startdt='+encodeURIComponent(new Date(e.start).toISOString())+'&enddt='+encodeURIComponent(new Date(e.end).toISOString());
-   const win=window.open(url,'_blank','noopener,noreferrer');
-   if(win)toast('Calendar opened. Confirm SAVE there to create a backup.');
-   else toast('Calendar window was blocked. Allow pop-ups or select the phone calendar in Setup.');
+   const link=document.createElement('a');link.href=url;link.target='_blank';link.rel='noopener noreferrer';document.body.appendChild(link);link.click();link.remove();
+   toast('If your calendar opens, review the event and choose Save to confirm the second copy. If nothing opens, check your browser pop-up settings.');
    return
  }
  const lines=['BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Life Command//Event Backup//EN','BEGIN:VEVENT','UID:'+e.id+'@life-command.local','DTSTAMP:'+lcCalendarTime(Date.now()),'DTSTART:'+from,'DTEND:'+to,'SUMMARY:'+lcICSQuote(e.title),'END:VEVENT','END:VCALENDAR'];
